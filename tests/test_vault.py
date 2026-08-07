@@ -213,3 +213,84 @@ async def test_real_vault_readonly_smoke() -> None:
     assert len(result["rows"]) > 3
     hits = await service.search("Bioconductor", limit=3)
     assert hits
+
+
+# ----------------------------------------------------------------- concurrency
+
+
+def test_concurrent_readers_and_writers(service: VaultService, vault: Path) -> None:
+    """Regression for the HTTP transport: FastMCP dispatches sync tools on a
+    threadpool, so index access and write verbs must be serialized."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    service.index.ttl_seconds = 0  # rebuild on every access to maximize contention
+
+    def reader() -> None:
+        for _ in range(10):
+            service.query("SELECT count(*) FROM notes")
+            service.recent(limit=2)
+            service.related("alpha")
+
+    def writer(i: int) -> None:
+        for n in range(5):
+            service.add_inbox_item(f"item {i}-{n}")
+            service.append_daily(f"entry {i}-{n}")
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        futures = [ex.submit(reader) for _ in range(4)] + [ex.submit(writer, i) for i in range(4)]
+        for f in futures:
+            f.result()  # re-raises anything a thread hit
+
+    inbox = (vault / "inbox.md").read_text()
+    assert sum("] item " in line for line in inbox.splitlines()) == 20
+    counts = service.refresh()
+    assert counts["notes"] == 5  # 4 fixture notes + today's journal file
+
+
+# -------------------------------------------------------------- http transport
+
+
+async def test_http_transport_round_trip(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Serve the real app over streamable HTTP and exercise a read and a write."""
+    import asyncio
+    import socket
+    import threading
+
+    import uvicorn
+    from fastmcp import Client
+
+    import vault_mcp.server as server
+
+    monkeypatch.setenv("VAULT_MCP_ROOT", str(vault))
+    monkeypatch.setattr(server, "_service", None)
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+
+    srv = uvicorn.Server(uvicorn.Config(server.mcp.http_app(), host="127.0.0.1", port=port, log_level="error"))
+    thread = threading.Thread(target=srv.run, daemon=True)
+    thread.start()
+    try:
+        for _ in range(100):
+            if srv.started:
+                break
+            await asyncio.sleep(0.05)
+        assert srv.started
+
+        async with Client(f"http://127.0.0.1:{port}/mcp") as client:
+            names = {t.name for t in await client.list_tools()}
+            assert {"search", "read_note", "related", "query", "create_note"} <= names
+
+            read = await client.call_tool("read_note", {"name_or_path": "alpha"})
+            assert read.data["path"] == "notes/alpha.md"
+
+            created = await client.call_tool(
+                "create_note", {"title": "Via HTTP", "content": "Round trip."}
+            )
+            assert created.data["path"] == "notes/via-http.md"
+            assert (vault / "notes" / "via-http.md").is_file()
+    finally:
+        srv.should_exit = True
+        thread.join(timeout=10)
