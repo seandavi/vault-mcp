@@ -7,11 +7,13 @@ constrained, convention-enforcing verbs (never arbitrary file writes).
 from __future__ import annotations
 
 import asyncio
+import functools
 import os
 import re
+import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 from vault_mcp.index import EXCLUDED_TOP_DIRS, VaultIndex
 
@@ -29,12 +31,32 @@ def slugify(title: str) -> str:
     return slug
 
 
+F = TypeVar("F", bound=Callable[..., Any])
+
+
+def locked(fn: F) -> F:
+    """Serialize a VaultService method under the instance lock.
+
+    The DuckDB connection is a single shared object (a rebuild closes the old
+    connection mid-query otherwise), and the write verbs do read-modify-write
+    on shared files — both unsafe once concurrent clients arrive over HTTP.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(self: VaultService, *args: Any, **kwargs: Any) -> Any:
+        with self._lock:
+            return fn(self, *args, **kwargs)
+
+    return wrapper  # type: ignore[return-value]
+
+
 class VaultService:
     def __init__(self, root: Path | None = None) -> None:
         self.root = (root or Path(os.environ.get(ROOT_ENV_VAR, DEFAULT_ROOT)).expanduser()).resolve()
         if not self.root.is_dir():
             raise FileNotFoundError(f"vault root does not exist: {self.root}")
         self.index = VaultIndex(self.root)
+        self._lock = threading.RLock()
 
     # ------------------------------------------------------------------ reads
 
@@ -76,7 +98,6 @@ class VaultService:
         if not by_file:
             return []
 
-        con = self.index.connection()
         placeholders = ",".join("?" for _ in by_file)
         sql = f"SELECT path, title, type, tags, date FROM notes WHERE path IN ({placeholders})"
         params: list[Any] = list(by_file)
@@ -86,7 +107,9 @@ class VaultService:
         if tag:
             sql += " AND list_contains(tags, ?)"
             params.append(tag)
-        meta = {r[0]: r for r in con.execute(sql, params).fetchall()}
+        with self._lock:
+            con = self.index.connection()
+            meta = {r[0]: r for r in con.execute(sql, params).fetchall()}
 
         results = [
             {
@@ -103,6 +126,7 @@ class VaultService:
         results.sort(key=lambda r: len(r["matches"]), reverse=True)
         return results[:limit]
 
+    @locked
     def resolve(self, name_or_path: str) -> Path:
         """Resolve a note name (wiki-link style) or vault-relative path to a file."""
         candidate = (self.root / name_or_path).resolve()
@@ -117,10 +141,12 @@ class VaultService:
             raise FileNotFoundError(f"no note matching {name_or_path!r}")
         return self.root / rows[0][0]
 
+    @locked
     def read(self, name_or_path: str) -> dict[str, str]:
         path = self.resolve(name_or_path)
         return {"path": str(path.relative_to(self.root)), "content": path.read_text(encoding="utf-8")}
 
+    @locked
     def related(self, name_or_path: str) -> dict[str, Any]:
         """Graph neighborhood of a note: outlinks, backlinks, shared-tag neighbors."""
         path = self.resolve(name_or_path)
@@ -167,6 +193,7 @@ class VaultService:
             "shared_tags": shared_tags,
         }
 
+    @locked
     def query(self, sql: str, limit: int = 200) -> dict[str, Any]:
         """Read-only SQL over the index. The index is a disposable cache, so the
         guard protects against accidents, not adversaries."""
@@ -179,6 +206,7 @@ class VaultService:
         rows = cur.fetchmany(limit)
         return {"columns": columns, "rows": [list(r) for r in rows]}
 
+    @locked
     def recent(self, limit: int = 10, type: str | None = None) -> list[dict[str, Any]]:
         sql = "SELECT path, title, type, modified FROM notes"
         params: list[Any] = []
@@ -194,6 +222,7 @@ class VaultService:
 
     # ----------------------------------------------------------------- writes
 
+    @locked
     def create_note(
         self, title: str, content: str, tags: list[str] | None = None, source: str = ""
     ) -> dict[str, str]:
@@ -210,6 +239,7 @@ class VaultService:
         self.index.invalidate()
         return {"path": str(path.relative_to(self.root))}
 
+    @locked
     def add_inbox_item(self, text: str) -> dict[str, str]:
         """Append an open action item under '## Action needed' in inbox.md."""
         inbox = self.root / "inbox.md"
@@ -232,6 +262,7 @@ class VaultService:
         self.index.invalidate()
         return {"path": "inbox.md", "item": item}
 
+    @locked
     def append_daily(self, text: str) -> dict[str, str]:
         """Append a timestamped entry to today's journal Log, creating the file
         from the daily template structure if needed."""
@@ -269,5 +300,6 @@ class VaultService:
 
     # ------------------------------------------------------------------ admin
 
+    @locked
     def refresh(self) -> dict[str, int]:
         return self.index.rebuild()
