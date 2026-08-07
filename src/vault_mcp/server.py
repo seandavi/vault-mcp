@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import click
 from fastmcp import FastMCP
 
 from vault_mcp.service import VaultService
@@ -138,5 +139,33 @@ def refresh_index() -> dict[str, int]:
     return get_service().refresh()
 
 
-def main() -> None:
-    mcp.run()
+@click.command(context_settings={"help_option_names": ["-h", "--help"]})
+@click.option(
+    "--http",
+    "use_http",
+    is_flag=True,
+    envvar="VAULT_MCP_HTTP",
+    help="Serve streamable HTTP at /mcp instead of stdio.",
+)
+@click.option(
+    "--host",
+    default="127.0.0.1",
+    envvar="VAULT_MCP_HOST",
+    show_default=True,
+    help="HTTP bind address. Keep 127.0.0.1 behind `tailscale serve`, or bind "
+    "the machine's Tailscale IP to serve the tailnet directly.",
+)
+@click.option(
+    "--port",
+    default=8787,
+    envvar="VAULT_MCP_PORT",
+    show_default=True,
+    type=int,
+    help="HTTP port.",
+)
+def main(use_http: bool, host: str, port: int) -> None:
+    """Expose the markdown vault as an MCP server (stdio by default)."""
+    if use_http:
+        mcp.run(transport="http", host=host, port=port)
+    else:
+        mcp.run()

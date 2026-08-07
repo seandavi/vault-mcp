@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
+    "click>=8.1",
     "duckdb>=1.5.5",
     "fastmcp>=3.4.6",
     "pyyaml>=6.0.3",

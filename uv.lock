@@ -1378,6 +1378,7 @@ name = "vault-mcp"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "click" },
     { name = "duckdb" },
     { name = "fastmcp" },
     { name = "pyyaml" },
@@ -1391,6 +1392,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "click", specifier = ">=8.1" },
     { name = "duckdb", specifier = ">=1.5.5" },
     { name = "fastmcp", specifier = ">=3.4.6" },
     { name = "pyyaml", specifier = ">=6.0.3" },
