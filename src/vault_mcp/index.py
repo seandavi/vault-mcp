@@ -67,11 +67,13 @@ class NoteRow:
     title: str
     type: str
     tags: list[str]
+    aliases: list[str]
     date: str | None
     status: str | None
     frontmatter: str  # JSON
     modified: datetime
     size: int
+    body: str  # note text with frontmatter stripped
 
 
 def parse_note(root: Path, abspath: Path) -> tuple[NoteRow, list[str]]:
@@ -93,11 +95,13 @@ def parse_note(root: Path, abspath: Path) -> tuple[NoteRow, list[str]]:
         title=title,
         type=note_type,
         tags=normalize_tags(fm.get("tags")),
+        aliases=normalize_tags(fm.get("aliases")),
         date=str(date) if date is not None else None,
         status=str(status) if status is not None else None,
         frontmatter=json.dumps(fm, default=str),
         modified=datetime.fromtimestamp(stat.st_mtime),
         size=stat.st_size,
+        body=body,
     )
     targets = sorted({t.strip() for t in WIKILINK_RE.findall(text) if t.strip()})
     return row, targets
@@ -111,6 +115,7 @@ class VaultIndex:
         self.ttl_seconds = ttl_seconds
         self._con: duckdb.DuckDBPyConnection | None = None
         self._built_at: float = 0.0
+        self._fts_built = False
 
     def invalidate(self) -> None:
         self._built_at = 0.0
@@ -131,11 +136,13 @@ class VaultIndex:
                 title VARCHAR,              -- first H1, else stem
                 type VARCHAR,               -- frontmatter `type`, else top-level dir
                 tags VARCHAR[],
+                aliases VARCHAR[],          -- frontmatter `aliases` (extra link targets)
                 date VARCHAR,
                 status VARCHAR,
                 frontmatter JSON,           -- full frontmatter
                 modified TIMESTAMP,
-                size BIGINT
+                size BIGINT,
+                body VARCHAR                -- note text, frontmatter stripped (FTS corpus)
             )
             """
         )
@@ -151,18 +158,49 @@ class VaultIndex:
             except OSError:
                 continue
             note_rows.append(
-                (row.path, row.name, row.title, row.type, row.tags, row.date,
-                 row.status, row.frontmatter, row.modified, row.size)
+                (row.path, row.name, row.title, row.type, row.tags, row.aliases,
+                 row.date, row.status, row.frontmatter, row.modified, row.size, row.body)
             )
             link_rows.extend((row.path, t) for t in targets)
 
-        if note_rows:
-            con.executemany("INSERT INTO notes VALUES (?,?,?,?,?,?,?,?,?,?)", note_rows)
-        if link_rows:
-            con.executemany("INSERT INTO links VALUES (?,?)", link_rows)
+        # Multi-row VALUES chunks: duckdb's executemany inserts row-by-row and
+        # cost ~2s on a 2k-note vault; this path measures ~0.4s.
+        self._bulk_insert(con, "notes", 12, note_rows)
+        self._bulk_insert(con, "links", 2, link_rows)
 
         if self._con is not None:
             self._con.close()
         self._con = con
         self._built_at = time.monotonic()
+        self._fts_built = False
         return {"notes": len(note_rows), "links": len(link_rows)}
+
+    @staticmethod
+    def _bulk_insert(
+        con: duckdb.DuckDBPyConnection, table: str, width: int, rows: list[tuple[Any, ...]]
+    ) -> None:
+        placeholder = "(" + ",".join("?" * width) + ")"
+        chunk_size = 500
+        for i in range(0, len(rows), chunk_size):
+            chunk = rows[i : i + chunk_size]
+            sql = f"INSERT INTO {table} VALUES " + ",".join([placeholder] * len(chunk))
+            con.execute(sql, [v for r in chunk for v in r])
+
+    def ensure_fts(self) -> None:
+        """Build the BM25 index over the current connection, once per rebuild.
+
+        Lazy: rebuilt table -> stale FTS is impossible because the flag resets
+        on rebuild, and non-ranked tools never pay the ~0.7s build cost.
+        The `ignore` override keeps digits searchable (the extension default
+        strips them); stopwords are disabled because BM25's IDF already
+        downweights common terms and the default SMART list eats real words.
+        """
+        if self._fts_built:
+            return
+        assert self._con is not None
+        self._con.execute(
+            "PRAGMA create_fts_index('notes', 'path', 'title', 'body', "
+            "stemmer='porter', stopwords='none', "
+            "ignore='(\\.|[^a-z0-9])+', lower=1, strip_accents=1, overwrite=1)"
+        )
+        self._fts_built = True
