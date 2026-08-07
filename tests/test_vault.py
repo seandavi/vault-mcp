@@ -30,7 +30,8 @@ def vault(tmp_path: Path) -> Path:
         "\n# Alpha Note\n\nLinks to [[beta]] and [[missing-note]].\n"
     )
     (root / "notes" / "gamma.md").write_text(
-        "---\ndate: 2026-08-02\ntags: memory\n---\n\n# Gamma\n\nStandalone idea.\n"
+        "---\ndate: 2026-08-02\ntags: memory\naliases: [standalone-note]\n---\n"
+        "\n# Gamma\n\nStandalone idea about duckdb 1.5.5 internals.\n"
     )
     (root / "decisions" / "beta.md").write_text(
         "---\ndate: 2026-08-03\nstatus: open\n---\n\n# Beta Decision\n\nSee [[alpha]].\n"
@@ -110,7 +111,21 @@ def test_resolve_traversal_guard(service: VaultService, tmp_path: Path) -> None:
 
 def test_resolve_missing(service: VaultService) -> None:
     with pytest.raises(FileNotFoundError):
-        service.read("no-such-note")
+        service.read("zzz-nothing-like-this")
+
+
+def test_resolve_alias(service: VaultService) -> None:
+    assert service.read("standalone-note")["path"] == "notes/gamma.md"
+
+
+def test_resolve_fuzzy_typo(service: VaultService) -> None:
+    # transposition typo, similarity above the 0.95 auto-resolve threshold
+    assert service.read("gamm")["path"] == "notes/gamma.md"
+
+
+def test_resolve_low_confidence_suggests(service: VaultService) -> None:
+    with pytest.raises(FileNotFoundError, match="did you mean"):
+        service.read("gma")
 
 
 # --------------------------------------------------------------------- related
@@ -188,16 +203,36 @@ def test_append_daily(service: VaultService, vault: Path) -> None:
 # ---------------------------------------------------------------------- search
 
 
-@pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
-async def test_search(service: VaultService) -> None:
+async def test_search_ranked_default(service: VaultService) -> None:
     hits = await service.search("Alpha")
     paths = [h["path"] for h in hits]
     assert "notes/alpha.md" in paths
-    # excluded dirs never surface, even though they contain "Alpha"
+    # excluded dirs are not in the index, so they can never surface
     assert not any(p.startswith(("templates/", "raw/", ".obsidian/")) for p in paths)
+    assert all("score" in h and "snippet" in h for h in hits)
     tagged = await service.search("idea", tag="memory")
     assert [h["path"] for h in tagged] == ["notes/gamma.md"]
-    assert await service.search("no-such-string-anywhere") == []
+    assert await service.search("xqzv") == []
+
+
+async def test_search_ranked_finds_digits(service: VaultService) -> None:
+    # guards the ignore-regex override: the extension default strips digits
+    hits = await service.search("1.5.5")
+    assert [h["path"] for h in hits] == ["notes/gamma.md"]
+
+
+async def test_search_rejects_unknown_mode(service: VaultService) -> None:
+    with pytest.raises(ValueError):
+        await service.search("x", match="fuzzy")
+
+
+@pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
+async def test_search_exact_and_regex(service: VaultService) -> None:
+    exact = await service.search("Standalone idea", match="exact")
+    assert [h["path"] for h in exact] == ["notes/gamma.md"]
+    assert exact[0]["matches"][0]["line"] > 0  # line numbers preserved
+    rx = await service.search(r"miss\w+-note", match="regex")
+    assert [h["path"] for h in rx] == ["notes/alpha.md"]
 
 
 # ----------------------------------------------- read-only smoke on real vault
@@ -212,7 +247,9 @@ async def test_real_vault_readonly_smoke() -> None:
     result = service.query("SELECT type, count(*) FROM notes GROUP BY type")
     assert len(result["rows"]) > 3
     hits = await service.search("Bioconductor", limit=3)
-    assert hits
+    assert hits and hits[0]["score"] > 0
+    exact = await service.search("Bioconductor", match="exact", limit=3)
+    assert exact
 
 
 # ----------------------------------------------------------------- concurrency
