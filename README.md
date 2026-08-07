@@ -111,9 +111,33 @@ tailscale serve --bg --https=443 127.0.0.1:8787
 
 Clients on the tailnet then use `https://<machine>.<tailnet>.ts.net/mcp`.
 
-Security model: the server itself has no auth; Tailscale is the auth layer.
-That holds only while it binds loopback (behind `tailscale serve`) or the
-machine's Tailscale IP — never bind `0.0.0.0`.
+Security model: on the tailnet the server runs with no auth; Tailscale is the
+auth layer. That holds only while it binds loopback (behind `tailscale serve`)
+or the machine's Tailscale IP — never bind `0.0.0.0`.
+
+## OAuth (optional)
+
+For any deployment where network trust isn't enough (the public Bioconductor
+layer, or defense-in-depth on the tailnet), turn on OAuth:
+
+```sh
+export VAULT_MCP_OAUTH_CLIENT_ID=$(gcloud secrets versions access latest --secret=vault-mcp-oauth-client-id)
+export VAULT_MCP_OAUTH_CLIENT_SECRET=$(gcloud secrets versions access latest --secret=vault-mcp-oauth-client-secret)
+
+vault-mcp --http --auth google --base-url https://<machine>.<tailnet>.ts.net
+```
+
+This is the MCP spec's OAuth 2.1 flow (via FastMCP's OAuth proxy): clients
+like Claude Code discover the server's auth metadata and pop the browser
+login on their own — the `claude mcp add --transport http ...` line doesn't
+change. Register `<base-url>/auth/callback` as an authorized redirect URI on
+the OAuth client (Google Cloud console → Credentials).
+
+Providers are a registry in `src/vault_mcp/auth.py` — `google` and `github`
+are wired; adding another is one entry (all FastMCP providers take
+`client_id` / `client_secret` / `base_url`). For launchd, use
+`deploy/vault-mcp-http.sh`, which pulls the credentials from Google Secret
+Manager at boot so secrets never sit in the plist.
 
 ## Development
 
