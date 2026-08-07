@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -26,6 +27,13 @@ H1_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
 
 # Top-level vault directories that hold support material, not memories.
 EXCLUDED_TOP_DIRS = frozenset({"templates", "raw", "node_modules"})
+
+NOTE_COLUMNS = {
+    "path": "VARCHAR", "name": "VARCHAR", "title": "VARCHAR", "type": "VARCHAR",
+    "tags": "VARCHAR[]", "aliases": "VARCHAR[]", "date": "VARCHAR", "status": "VARCHAR",
+    "frontmatter": "JSON", "modified": "TIMESTAMP", "size": "BIGINT", "body": "VARCHAR",
+}
+LINK_COLUMNS = {"source": "VARCHAR", "target": "VARCHAR"}
 
 
 def is_indexable(rel: Path) -> bool:
@@ -163,10 +171,11 @@ class VaultIndex:
             )
             link_rows.extend((row.path, t) for t in targets)
 
-        # Multi-row VALUES chunks: duckdb's executemany inserts row-by-row and
-        # cost ~2s on a 2k-note vault; this path measures ~0.4s.
-        self._bulk_insert(con, "notes", 12, note_rows)
-        self._bulk_insert(con, "links", 2, link_rows)
+        # Parameter binding is duckdb's slow path (~2s for a 2k-note vault via
+        # executemany or multi-row VALUES); its native NDJSON reader loads the
+        # same rows in <0.1s.
+        self._load_ndjson(con, "notes", NOTE_COLUMNS, note_rows)
+        self._load_ndjson(con, "links", LINK_COLUMNS, link_rows)
 
         if self._con is not None:
             self._con.close()
@@ -176,15 +185,28 @@ class VaultIndex:
         return {"notes": len(note_rows), "links": len(link_rows)}
 
     @staticmethod
-    def _bulk_insert(
-        con: duckdb.DuckDBPyConnection, table: str, width: int, rows: list[tuple[Any, ...]]
+    def _load_ndjson(
+        con: duckdb.DuckDBPyConnection,
+        table: str,
+        columns: dict[str, str],
+        rows: list[tuple[Any, ...]],
     ) -> None:
-        placeholder = "(" + ",".join("?" * width) + ")"
-        chunk_size = 500
-        for i in range(0, len(rows), chunk_size):
-            chunk = rows[i : i + chunk_size]
-            sql = f"INSERT INTO {table} VALUES " + ",".join([placeholder] * len(chunk))
-            con.execute(sql, [v for r in chunk for v in r])
+        if not rows:
+            return
+        names = list(columns)
+        with tempfile.NamedTemporaryFile("w", suffix=".ndjson", delete=False) as f:
+            for r in rows:
+                json.dump(dict(zip(names, r)), f, default=str)
+                f.write("\n")
+            tmp = f.name
+        try:
+            spec = ",".join(f"'{n}':'{t}'" for n, t in columns.items())
+            con.execute(
+                f"INSERT INTO {table} SELECT * FROM read_json('{tmp}', "
+                f"format='newline_delimited', columns={{{spec}}})"
+            )
+        finally:
+            Path(tmp).unlink(missing_ok=True)
 
     def ensure_fts(self) -> None:
         """Build the BM25 index over the current connection, once per rebuild.
