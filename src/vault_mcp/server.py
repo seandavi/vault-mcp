@@ -48,23 +48,28 @@ async def search(
     query: str,
     type: str | None = None,
     tag: str | None = None,
-    regex: bool = False,
+    match: str = "ranked",
     limit: int = 20,
 ) -> list[dict[str, Any]]:
-    """Full-text search over the vault's markdown files.
+    """Search the vault's markdown files.
 
     Args:
-        query: Text to find (literal by default; set regex=True for a regex).
+        query: What to find.
         type: Filter by note type — the frontmatter `type` field, else the
             top-level directory (e.g. notes, decisions, journal, people, wiki).
         tag: Filter to notes carrying this frontmatter tag.
-        regex: Treat `query` as a regular expression.
-        limit: Maximum number of files to return.
+        match: "ranked" (default) — BM25 relevance over title + body; best for
+            topical recall ("what do I know about X"). Terms are stemmed and
+            OR'd; there is no phrase or boolean syntax. "exact" — literal
+            substring line-match via ripgrep, with line numbers; use for
+            identifiers and exact phrases. "regex" — ripgrep regular
+            expression.
+        limit: Maximum number of notes to return.
 
-    Returns files ranked by match count, each with title, type, tags, and up
-    to 5 matching lines with line numbers.
+    Ranked hits carry a bm25 `score` and up to 3 `snippet` lines; exact/regex
+    hits carry up to 5 matching lines with line numbers.
     """
-    return await get_service().search(query, type=type, tag=tag, regex=regex, limit=limit)
+    return await get_service().search(query, type=type, tag=tag, match=match, limit=limit)
 
 
 @mcp.tool
@@ -89,8 +94,9 @@ def query(sql: str, limit: int = 200) -> dict[str, Any]:
     source of truth.
 
     Schema:
-        notes(path, name, title, type, tags VARCHAR[], date, status,
-              frontmatter JSON, modified TIMESTAMP, size)
+        notes(path, name, title, type, tags VARCHAR[], aliases VARCHAR[],
+              date, status, frontmatter JSON, modified TIMESTAMP, size,
+              body /* full note text — SELECT specific columns, not * */)
         links(source /* path */, target /* wiki-link name as written */)
 
     Examples:

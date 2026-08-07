@@ -65,16 +65,20 @@ class VaultService:
         query: str,
         type: str | None = None,
         tag: str | None = None,
-        regex: bool = False,
+        match: str = "ranked",
         limit: int = 20,
     ) -> list[dict[str, Any]]:
-        """Full-text search via ripgrep, optionally filtered by indexed metadata."""
+        """Search the vault: BM25 ranking by default, ripgrep for exact/regex."""
+        if match == "ranked":
+            return self._search_ranked(query, type=type, tag=tag, limit=limit)
+        if match not in ("exact", "regex"):
+            raise ValueError("match must be one of: ranked, exact, regex")
         args = [
             "rg", "--no-heading", "--with-filename", "--line-number",
             "--smart-case", "--max-count", "5", "--glob", "*.md",
             *(f"--glob=!{d}/**" for d in sorted(EXCLUDED_TOP_DIRS)),
         ]
-        if not regex:
+        if match == "exact":
             args.append("--fixed-strings")
         args.extend(["--", query, "."])
 
@@ -126,20 +130,86 @@ class VaultService:
         results.sort(key=lambda r: len(r["matches"]), reverse=True)
         return results[:limit]
 
+    def _search_ranked(
+        self, query: str, *, type: str | None, tag: str | None, limit: int
+    ) -> list[dict[str, Any]]:
+        """BM25 over title+body. Scores must be filtered via a subquery alias —
+        filtering match_bm25 directly in WHERE returns wrong rows (duckdb-fts
+        1.5.5; see docs/research/duckdb-fts.md)."""
+        sql = """
+            SELECT path, title, type, tags, date, score, body FROM (
+                SELECT *, fts_main_notes.match_bm25(path, ?) AS score FROM notes
+            ) WHERE score IS NOT NULL
+        """
+        params: list[Any] = [query]
+        if type:
+            sql += " AND type = ?"
+            params.append(type)
+        if tag:
+            sql += " AND list_contains(tags, ?)"
+            params.append(tag)
+        sql += " ORDER BY score DESC LIMIT ?"
+        params.append(limit)
+
+        with self._lock:
+            con = self.index.connection()
+            self.index.ensure_fts()
+            rows = con.execute(sql, params).fetchall()
+
+        terms = [t for t in re.split(r"[^a-z0-9]+", query.lower()) if t]
+        results = []
+        for path, title, ntype, tags, date, score, body in rows:
+            snippet = [
+                line.strip()[:300]
+                for line in body.splitlines()
+                if line.strip() and any(t in line.lower() for t in terms)
+            ][:3]
+            results.append(
+                {"path": path, "title": title, "type": ntype, "tags": tags,
+                 "date": date, "score": round(score, 3), "snippet": snippet}
+            )
+        return results
+
     @locked
     def resolve(self, name_or_path: str) -> Path:
-        """Resolve a note name (wiki-link style) or vault-relative path to a file."""
+        """Resolve a vault-relative path, note name, or frontmatter alias.
+
+        Typos auto-resolve only above high similarity (0.95 Jaro-Winkler);
+        below that the error carries did-you-mean candidates instead of
+        silently guessing."""
         candidate = (self.root / name_or_path).resolve()
         if candidate.is_file() and candidate.is_relative_to(self.root):
             return candidate
+        stem = Path(name_or_path).stem
         con = self.index.connection()
         rows = con.execute(
-            "SELECT path FROM notes WHERE lower(name) = lower(?) ORDER BY modified DESC",
-            [Path(name_or_path).stem],
+            """
+            SELECT path FROM notes
+            WHERE lower(name) = lower(?)
+               OR list_contains(list_transform(aliases, a -> lower(a)), lower(?))
+            ORDER BY modified DESC
+            """,
+            [stem, stem],
         ).fetchall()
-        if not rows:
-            raise FileNotFoundError(f"no note matching {name_or_path!r}")
-        return self.root / rows[0][0]
+        if rows:
+            return self.root / rows[0][0]
+
+        fuzzy = con.execute(
+            """
+            SELECT path, name, greatest(
+                jaro_winkler_similarity(lower(name), lower(?)),
+                coalesce(list_max(list_transform(
+                    aliases, a -> jaro_winkler_similarity(lower(a), lower(?)))), 0.0)
+            ) AS sim
+            FROM notes ORDER BY sim DESC, modified DESC LIMIT 3
+            """,
+            [stem, stem],
+        ).fetchall()
+        if fuzzy and fuzzy[0][2] >= 0.95:
+            return self.root / fuzzy[0][0]
+        suggestions = ", ".join(f"{name}" for _, name, sim in fuzzy if sim >= 0.7)
+        hint = f" — did you mean: {suggestions}?" if suggestions else ""
+        raise FileNotFoundError(f"no note matching {name_or_path!r}{hint}")
 
     @locked
     def read(self, name_or_path: str) -> dict[str, str]:
