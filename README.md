@@ -28,8 +28,8 @@ instructions so every connected agent receives it:
 
 | Tool | Kind | What it does |
 | --- | --- | --- |
-| `search(query, type?, tag?, regex?, limit?)` | read | ripgrep full-text search, filtered by indexed metadata, ranked by match count |
-| `read_note(name_or_path)` | read | resolve a wiki-link name or vault-relative path; return content |
+| `search(query, type?, tag?, match?, limit?)` | read | `ranked` (default): BM25 over title+body with score + snippet lines; `exact`/`regex`: ripgrep line matches with line numbers |
+| `read_note(name_or_path)` | read | resolve a vault-relative path, note name, or frontmatter alias (typos auto-correct above 0.95 similarity; below that the error carries did-you-mean candidates) |
 | `related(name_or_path)` | read | graph neighborhood: outlinks, backlinks, unresolved links, shared-tag neighbors |
 | `query(sql, limit?)` | read | read-only SQL (DuckDB dialect, SELECT/WITH only) over `notes` and `links` tables |
 | `recent(limit?, type?)` | read | most recently modified notes |
@@ -41,9 +41,15 @@ instructions so every connected agent receives it:
 Index schema for `query`:
 
 ```sql
-notes(path, name, title, type, tags VARCHAR[], date, status, frontmatter JSON, modified TIMESTAMP, size)
+notes(path, name, title, type, tags VARCHAR[], aliases VARCHAR[], date, status,
+      frontmatter JSON, modified TIMESTAMP, size, body /* SELECT columns, not * */)
 links(source /* note path */, target /* wiki-link name as written */)
 ```
+
+Ranked search is DuckDB's FTS extension (BM25; digits searchable, stopwords
+disabled — see `docs/research/duckdb-fts.md` for the extension's real
+constraints). The FTS index builds lazily, once per rebuild, on first ranked
+query.
 
 `templates/`, `raw/`, and dot-directories are excluded from indexing and search.
 
@@ -142,8 +148,9 @@ Manager at boot so secrets never sit in the plist.
 ## Development
 
 ```sh
-uv run pytest        # fixture-vault tests + one read-only smoke test on the real vault
-uv run vault-mcp     # run the server on stdio
+uv run pytest                    # fixture-vault tests + a read-only smoke test on the real vault
+uv run vault-mcp                 # run the server on stdio
+uv run python -m vault_mcp.eval  # retrieval eval (query set: <vault>/.vault-mcp/eval.yaml)
 ```
 
 ## Roadmap
