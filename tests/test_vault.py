@@ -425,3 +425,28 @@ async def test_http_auth_rejects_anonymous(vault: Path, monkeypatch: pytest.Monk
     finally:
         srv.should_exit = True
         thread.join(timeout=10)
+
+
+# ------------------------------------------------------------------------ eval
+
+
+async def test_eval_harness(service: VaultService) -> None:
+    from vault_mcp.eval import run_eval, summarize
+
+    entries = [
+        # topical: both engines should find gamma
+        {"name": "topical", "query": "duckdb internals", "expect": ["notes/gamma.md"]},
+        # substring-of-token: ripgrep-only by construction (FTS tokenizes)
+        {"name": "substring", "query": "andalone", "expect": ["notes/gamma.md"]},
+    ]
+    results = await run_eval(service, entries, k=5)
+    by_name = {r.name: r for r in results}
+    # each engine wins exactly one: BM25 handles word gaps, rg handles substrings
+    assert by_name["topical"].modes["ranked"].rank == 1
+    assert by_name["topical"].modes["exact"].rank is None     # literal has a word gap
+    assert by_name["substring"].modes["ranked"].rank is None  # FTS can't substring
+    assert by_name["substring"].modes["exact"].rank == 1
+
+    summary = summarize(results)
+    assert summary["ranked"]["hit_rate"] == 0.5
+    assert summary["exact"]["hit_rate"] == 0.5
