@@ -294,3 +294,97 @@ async def test_http_transport_round_trip(vault: Path, monkeypatch: pytest.Monkey
     finally:
         srv.should_exit = True
         thread.join(timeout=10)
+
+
+# ------------------------------------------------------------------------ auth
+
+
+def test_build_auth_unknown_provider() -> None:
+    from vault_mcp.auth import build_auth
+
+    with pytest.raises(ValueError, match="unknown auth provider"):
+        build_auth("okta", "https://example.ts.net")
+
+
+def test_build_auth_requires_base_url_and_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    from vault_mcp.auth import CLIENT_ID_ENV, CLIENT_SECRET_ENV, build_auth
+
+    monkeypatch.delenv(CLIENT_ID_ENV, raising=False)
+    monkeypatch.delenv(CLIENT_SECRET_ENV, raising=False)
+    with pytest.raises(ValueError, match="base URL"):
+        build_auth("google", None)
+    with pytest.raises(ValueError, match=CLIENT_ID_ENV):
+        build_auth("google", "https://example.ts.net")
+
+
+def test_build_auth_google(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastmcp.server.auth.providers.google import GoogleProvider
+
+    from vault_mcp.auth import CLIENT_ID_ENV, CLIENT_SECRET_ENV, build_auth
+
+    monkeypatch.setenv(CLIENT_ID_ENV, "client.apps.googleusercontent.com")
+    monkeypatch.setenv(CLIENT_SECRET_ENV, "secret")
+    provider = build_auth("google", "https://example.ts.net")
+    assert isinstance(provider, GoogleProvider)
+
+
+def test_cli_auth_requires_http() -> None:
+    from click.testing import CliRunner
+
+    from vault_mcp.server import main
+
+    result = CliRunner().invoke(main, ["--auth", "google"])
+    assert result.exit_code != 0
+    assert "--auth requires --http" in result.output
+
+
+async def test_http_auth_rejects_anonymous(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With an OAuth provider attached, /mcp must 401 without a token and the
+    protected-resource metadata the client's OAuth flow needs must be served."""
+    import asyncio
+    import socket
+    import threading
+
+    import httpx
+    import uvicorn
+
+    import vault_mcp.server as server
+    from vault_mcp.auth import CLIENT_ID_ENV, CLIENT_SECRET_ENV, build_auth
+
+    monkeypatch.setenv("VAULT_MCP_ROOT", str(vault))
+    monkeypatch.setattr(server, "_service", None)
+    monkeypatch.setenv(CLIENT_ID_ENV, "client.apps.googleusercontent.com")
+    monkeypatch.setenv(CLIENT_SECRET_ENV, "secret")
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    base = f"http://127.0.0.1:{port}"
+
+    monkeypatch.setattr(server.mcp, "auth", build_auth("google", base))
+    srv = uvicorn.Server(uvicorn.Config(server.mcp.http_app(), host="127.0.0.1", port=port, log_level="error"))
+    thread = threading.Thread(target=srv.run, daemon=True)
+    thread.start()
+    try:
+        for _ in range(100):
+            if srv.started:
+                break
+            await asyncio.sleep(0.05)
+        assert srv.started
+
+        async with httpx.AsyncClient(base_url=base) as http:
+            anon = await http.post(
+                "/mcp",
+                json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+                headers={"accept": "application/json, text/event-stream"},
+            )
+            assert anon.status_code == 401
+            assert "www-authenticate" in anon.headers
+
+            meta = await http.get("/.well-known/oauth-protected-resource/mcp")
+            assert meta.status_code == 200
+            assert meta.json()["resource"].startswith(base)
+    finally:
+        srv.should_exit = True
+        thread.join(timeout=10)
