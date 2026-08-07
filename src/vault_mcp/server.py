@@ -11,6 +11,7 @@ from typing import Any
 import click
 from fastmcp import FastMCP
 
+from vault_mcp.auth import PROVIDERS, build_auth
 from vault_mcp.service import VaultService
 
 INSTRUCTIONS = """\
@@ -163,8 +164,32 @@ def refresh_index() -> dict[str, int]:
     type=int,
     help="HTTP port.",
 )
-def main(use_http: bool, host: str, port: int) -> None:
+@click.option(
+    "--auth",
+    "auth_provider",
+    default="none",
+    envvar="VAULT_MCP_AUTH",
+    show_default=True,
+    type=click.Choice(["none", *sorted(PROVIDERS)]),
+    help="OAuth provider for the HTTP transport. Credentials come from "
+    "VAULT_MCP_OAUTH_CLIENT_ID / VAULT_MCP_OAUTH_CLIENT_SECRET.",
+)
+@click.option(
+    "--base-url",
+    envvar="VAULT_MCP_BASE_URL",
+    default=None,
+    help="Public URL clients reach the server at (required with --auth), "
+    "e.g. https://mac.tailnet.ts.net",
+)
+def main(use_http: bool, host: str, port: int, auth_provider: str, base_url: str | None) -> None:
     """Expose the markdown vault as an MCP server (stdio by default)."""
+    if auth_provider != "none":
+        if not use_http:
+            raise click.UsageError("--auth requires --http (stdio has no auth layer)")
+        try:
+            mcp.auth = build_auth(auth_provider, base_url)
+        except ValueError as exc:
+            raise click.UsageError(str(exc)) from exc
     if use_http:
         mcp.run(transport="http", host=host, port=port)
     else:
