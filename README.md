@@ -54,10 +54,20 @@ The vault root defaults to `~/Documents/seandavis`; override with the
 
 Requires [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) on PATH.
 
+### Transports
+
+`vault-mcp` speaks stdio by default. Pass `--http` to serve streamable HTTP
+at `/mcp` (`--host`/`--port`, default `127.0.0.1:8787`; also settable via
+`VAULT_MCP_HTTP`, `VAULT_MCP_HOST`, `VAULT_MCP_PORT`).
+
 ### Claude Code
 
 ```sh
+# stdio (local spawn)
 claude mcp add vault-memory -- uv run --directory ~/Documents/git/vault-mcp vault-mcp
+
+# HTTP (shared server, e.g. over the tailnet)
+claude mcp add --transport http vault-memory https://<machine>.<tailnet>.ts.net/mcp
 ```
 
 ### Gemini CLI (`~/.gemini/settings.json`)
@@ -80,6 +90,30 @@ claude mcp add vault-memory -- uv run --directory ~/Documents/git/vault-mcp vaul
 command = "uv"
 args = ["run", "--directory", "/Users/davsean/Documents/git/vault-mcp", "vault-mcp"]
 ```
+
+## Serving the tailnet
+
+One HTTP server co-located with the vault gives every dev machine the same
+memory substrate — one canonical index, one writer (which also keeps
+Obsidian-sync conflicts down, since remote machines write through the API
+instead of writing files and hoping sync merges them).
+
+On the machine that owns the vault:
+
+```sh
+# 1. Run vault-mcp as a LaunchAgent (binds 127.0.0.1:8787)
+cp deploy/com.seandavis.vault-mcp.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.seandavis.vault-mcp.plist
+
+# 2. Front it with Tailscale Serve: real TLS certs, tailnet-only reachability
+tailscale serve --bg --https=443 127.0.0.1:8787
+```
+
+Clients on the tailnet then use `https://<machine>.<tailnet>.ts.net/mcp`.
+
+Security model: the server itself has no auth; Tailscale is the auth layer.
+That holds only while it binds loopback (behind `tailscale serve`) or the
+machine's Tailscale IP — never bind `0.0.0.0`.
 
 ## Development
 
