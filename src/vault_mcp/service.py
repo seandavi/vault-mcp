@@ -1,0 +1,273 @@
+"""Vault operations behind the MCP tools.
+
+All reads go through ripgrep and the DuckDB index; all writes go through
+constrained, convention-enforcing verbs (never arbitrary file writes).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import re
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from vault_mcp.index import EXCLUDED_TOP_DIRS, VaultIndex
+
+DEFAULT_ROOT = "~/Documents/seandavis"
+ROOT_ENV_VAR = "VAULT_MCP_ROOT"
+
+SLUG_RE = re.compile(r"[^a-z0-9]+")
+READONLY_SQL_RE = re.compile(r"^\s*(select|with)\b", re.IGNORECASE)
+
+
+def slugify(title: str) -> str:
+    slug = SLUG_RE.sub("-", title.lower()).strip("-")
+    if not slug:
+        raise ValueError(f"cannot derive a slug from title {title!r}")
+    return slug
+
+
+class VaultService:
+    def __init__(self, root: Path | None = None) -> None:
+        self.root = (root or Path(os.environ.get(ROOT_ENV_VAR, DEFAULT_ROOT)).expanduser()).resolve()
+        if not self.root.is_dir():
+            raise FileNotFoundError(f"vault root does not exist: {self.root}")
+        self.index = VaultIndex(self.root)
+
+    # ------------------------------------------------------------------ reads
+
+    async def search(
+        self,
+        query: str,
+        type: str | None = None,
+        tag: str | None = None,
+        regex: bool = False,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Full-text search via ripgrep, optionally filtered by indexed metadata."""
+        args = [
+            "rg", "--no-heading", "--with-filename", "--line-number",
+            "--smart-case", "--max-count", "5", "--glob", "*.md",
+            *(f"--glob=!{d}/**" for d in sorted(EXCLUDED_TOP_DIRS)),
+        ]
+        if not regex:
+            args.append("--fixed-strings")
+        args.extend(["--", query, "."])
+
+        proc = await asyncio.create_subprocess_exec(
+            *args, cwd=self.root,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode not in (0, 1):  # 1 = no matches
+            raise RuntimeError(f"ripgrep failed: {stderr.decode().strip()}")
+
+        by_file: dict[str, list[dict[str, Any]]] = {}
+        for line in stdout.decode(errors="replace").splitlines():
+            parts = line.split(":", 2)
+            if len(parts) != 3:
+                continue
+            path, lineno, text = parts
+            path = path.removeprefix("./")
+            by_file.setdefault(path, []).append({"line": int(lineno), "text": text.strip()[:300]})
+
+        if not by_file:
+            return []
+
+        con = self.index.connection()
+        placeholders = ",".join("?" for _ in by_file)
+        sql = f"SELECT path, title, type, tags, date FROM notes WHERE path IN ({placeholders})"
+        params: list[Any] = list(by_file)
+        if type:
+            sql += " AND type = ?"
+            params.append(type)
+        if tag:
+            sql += " AND list_contains(tags, ?)"
+            params.append(tag)
+        meta = {r[0]: r for r in con.execute(sql, params).fetchall()}
+
+        results = [
+            {
+                "path": path,
+                "title": meta[path][1],
+                "type": meta[path][2],
+                "tags": meta[path][3],
+                "date": meta[path][4],
+                "matches": matches,
+            }
+            for path, matches in by_file.items()
+            if path in meta
+        ]
+        results.sort(key=lambda r: len(r["matches"]), reverse=True)
+        return results[:limit]
+
+    def resolve(self, name_or_path: str) -> Path:
+        """Resolve a note name (wiki-link style) or vault-relative path to a file."""
+        candidate = (self.root / name_or_path).resolve()
+        if candidate.is_file() and candidate.is_relative_to(self.root):
+            return candidate
+        con = self.index.connection()
+        rows = con.execute(
+            "SELECT path FROM notes WHERE lower(name) = lower(?) ORDER BY modified DESC",
+            [Path(name_or_path).stem],
+        ).fetchall()
+        if not rows:
+            raise FileNotFoundError(f"no note matching {name_or_path!r}")
+        return self.root / rows[0][0]
+
+    def read(self, name_or_path: str) -> dict[str, str]:
+        path = self.resolve(name_or_path)
+        return {"path": str(path.relative_to(self.root)), "content": path.read_text(encoding="utf-8")}
+
+    def related(self, name_or_path: str) -> dict[str, Any]:
+        """Graph neighborhood of a note: outlinks, backlinks, shared-tag neighbors."""
+        path = self.resolve(name_or_path)
+        rel = str(path.relative_to(self.root))
+        con = self.index.connection()
+        name, tags = con.execute("SELECT name, tags FROM notes WHERE path = ?", [rel]).fetchone()
+
+        outlinks, unresolved = [], []
+        for (target,) in con.execute("SELECT DISTINCT target FROM links WHERE source = ?", [rel]).fetchall():
+            hit = con.execute(
+                "SELECT path, title FROM notes WHERE lower(name) = lower(?) LIMIT 1", [target]
+            ).fetchone()
+            (outlinks.append({"name": target, "path": hit[0], "title": hit[1]}) if hit
+             else unresolved.append(target))
+
+        backlinks = [
+            {"path": p, "title": t}
+            for p, t in con.execute(
+                """
+                SELECT DISTINCT n.path, n.title FROM links l
+                JOIN notes n ON n.path = l.source
+                WHERE lower(l.target) = lower(?) AND l.source != ?
+                """,
+                [name, rel],
+            ).fetchall()
+        ]
+        shared_tags = [
+            {"path": p, "title": t, "shared": s}
+            for p, t, s in con.execute(
+                """
+                SELECT path, title, list_intersect(tags, ?) AS shared FROM notes
+                WHERE path != ? AND len(list_intersect(tags, ?)) > 0
+                ORDER BY len(shared) DESC, modified DESC LIMIT 10
+                """,
+                [tags, rel, tags],
+            ).fetchall()
+        ] if tags else []
+
+        return {
+            "path": rel,
+            "outlinks": outlinks,
+            "unresolved_outlinks": unresolved,
+            "backlinks": backlinks,
+            "shared_tags": shared_tags,
+        }
+
+    def query(self, sql: str, limit: int = 200) -> dict[str, Any]:
+        """Read-only SQL over the index. The index is a disposable cache, so the
+        guard protects against accidents, not adversaries."""
+        if not READONLY_SQL_RE.match(sql):
+            raise ValueError("only SELECT/WITH queries are allowed")
+        if ";" in sql.rstrip().rstrip(";"):
+            raise ValueError("multiple statements are not allowed")
+        cur = self.index.connection().execute(sql)
+        columns = [d[0] for d in cur.description]
+        rows = cur.fetchmany(limit)
+        return {"columns": columns, "rows": [list(r) for r in rows]}
+
+    def recent(self, limit: int = 10, type: str | None = None) -> list[dict[str, Any]]:
+        sql = "SELECT path, title, type, modified FROM notes"
+        params: list[Any] = []
+        if type:
+            sql += " WHERE type = ?"
+            params.append(type)
+        sql += " ORDER BY modified DESC LIMIT ?"
+        params.append(limit)
+        return [
+            {"path": p, "title": t, "type": ty, "modified": str(m)}
+            for p, t, ty, m in self.index.connection().execute(sql, params).fetchall()
+        ]
+
+    # ----------------------------------------------------------------- writes
+
+    def create_note(
+        self, title: str, content: str, tags: list[str] | None = None, source: str = ""
+    ) -> dict[str, str]:
+        """Create an atomic note in notes/ following the vault's note template."""
+        path = self.root / "notes" / f"{slugify(title)}.md"
+        if path.exists():
+            raise FileExistsError(f"note already exists: {path.relative_to(self.root)}")
+        tag_line = f"[{', '.join(tags)}]" if tags else "[]"
+        path.write_text(
+            f"---\ndate: {datetime.now():%Y-%m-%d}\ntags: {tag_line}\nsource: {source}\n---\n"
+            f"\n# {title}\n\n{content.rstrip()}\n",
+            encoding="utf-8",
+        )
+        self.index.invalidate()
+        return {"path": str(path.relative_to(self.root))}
+
+    def add_inbox_item(self, text: str) -> dict[str, str]:
+        """Append an open action item under '## Action needed' in inbox.md."""
+        inbox = self.root / "inbox.md"
+        item = f"- [ ] {text.strip()} (via vault-mcp, {datetime.now():%Y-%m-%d})"
+        lines = inbox.read_text(encoding="utf-8").splitlines() if inbox.exists() else ["# Inbox", "", "## Action needed"]
+        for i, line in enumerate(lines):
+            if line.strip() == "## Action needed":
+                insert_at = i + 1
+                while insert_at < len(lines) and not lines[insert_at].strip():
+                    insert_at += 1
+                if insert_at >= len(lines) or lines[insert_at].lstrip().startswith("#"):
+                    lines.insert(insert_at, "")
+                lines.insert(insert_at, item)
+                if lines[i + 1].strip():
+                    lines.insert(i + 1, "")
+                break
+        else:
+            lines.extend(["", "## Action needed", "", item])
+        inbox.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.index.invalidate()
+        return {"path": "inbox.md", "item": item}
+
+    def append_daily(self, text: str) -> dict[str, str]:
+        """Append a timestamped entry to today's journal Log, creating the file
+        from the daily template structure if needed."""
+        now = datetime.now()
+        path = self.root / "journal" / f"{now:%Y}" / f"{now:%m}" / f"{now:%Y-%m-%d}.md"
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                f"# {now:%A, %B} {now.day}, {now:%Y}\n\n"
+                '## Morning (Franklin: "What good shall I do this day?")\n\n'
+                "## Log\n\n"
+                '## Evening (Franklin: "What good have I done today?")\n',
+                encoding="utf-8",
+            )
+        entry = f"- **{now:%H:%M}** — {text.strip()}"
+        lines = path.read_text(encoding="utf-8").splitlines()
+        try:
+            log_at = next(i for i, l in enumerate(lines) if l.strip().startswith("## Log"))
+        except StopIteration:
+            lines.extend(["", "## Log", "", entry])
+        else:
+            end = next(
+                (i for i in range(log_at + 1, len(lines)) if lines[i].startswith("## ")),
+                len(lines),
+            )
+            while end > log_at + 1 and not lines[end - 1].strip():
+                end -= 1
+            if end == log_at + 1:  # empty Log section — keep a blank after the heading
+                lines.insert(end, "")
+                end += 1
+            lines.insert(end, entry)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.index.invalidate()
+        return {"path": str(path.relative_to(self.root)), "entry": entry}
+
+    # ------------------------------------------------------------------ admin
+
+    def refresh(self) -> dict[str, int]:
+        return self.index.rebuild()

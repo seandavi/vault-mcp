@@ -1,0 +1,142 @@
+"""FastMCP server exposing the vault as a shared memory substrate.
+
+Storage truth lives in the markdown files (versioned by jj/git); the DuckDB
+index is a disposable cache. Writes go through constrained verbs only.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from fastmcp import FastMCP
+
+from vault_mcp.service import VaultService
+
+INSTRUCTIONS = """\
+This server exposes a personal knowledge vault as a memory substrate.
+
+The vault is a collection of durable, human-readable artifacts — not an agent
+transcript store. Do not create memories merely because information appeared
+in a conversation. Write a memory only when it represents a durable fact,
+decision, idea, relationship, or useful piece of project context.
+
+Write verbs and their stores:
+- append_daily: episodic capture — timestamped log line in today's journal.
+- add_inbox_item: prospective memory — an open action item.
+- create_note: promoted semantic memory — one atomic idea per note, linked
+  generously with [[wiki-links]] to related notes.
+
+Read before you write: use search/related to check whether a memory already
+exists, and prefer linking to it over duplicating it.
+"""
+
+mcp = FastMCP("vault-memory", instructions=INSTRUCTIONS)
+_service: VaultService | None = None
+
+
+def get_service() -> VaultService:
+    global _service
+    if _service is None:
+        _service = VaultService()
+    return _service
+
+
+@mcp.tool
+async def search(
+    query: str,
+    type: str | None = None,
+    tag: str | None = None,
+    regex: bool = False,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """Full-text search over the vault's markdown files.
+
+    Args:
+        query: Text to find (literal by default; set regex=True for a regex).
+        type: Filter by note type — the frontmatter `type` field, else the
+            top-level directory (e.g. notes, decisions, journal, people, wiki).
+        tag: Filter to notes carrying this frontmatter tag.
+        regex: Treat `query` as a regular expression.
+        limit: Maximum number of files to return.
+
+    Returns files ranked by match count, each with title, type, tags, and up
+    to 5 matching lines with line numbers.
+    """
+    return await get_service().search(query, type=type, tag=tag, regex=regex, limit=limit)
+
+
+@mcp.tool
+def read_note(name_or_path: str) -> dict[str, str]:
+    """Read a note by wiki-link name (e.g. 'icegate') or vault-relative path
+    (e.g. 'notes/icegate.md'). Returns the resolved path and full content."""
+    return get_service().read(name_or_path)
+
+
+@mcp.tool
+def related(name_or_path: str) -> dict[str, Any]:
+    """Graph neighborhood of a note: resolved outgoing [[wiki-links]],
+    unresolved link targets, backlinks (notes linking here), and up to 10
+    notes sharing frontmatter tags."""
+    return get_service().related(name_or_path)
+
+
+@mcp.tool
+def query(sql: str, limit: int = 200) -> dict[str, Any]:
+    """Run read-only SQL (DuckDB dialect; SELECT/WITH only) over the vault
+    metadata index. The index is rebuilt from the files — it is never a
+    source of truth.
+
+    Schema:
+        notes(path, name, title, type, tags VARCHAR[], date, status,
+              frontmatter JSON, modified TIMESTAMP, size)
+        links(source /* path */, target /* wiki-link name as written */)
+
+    Examples:
+        SELECT type, count(*) FROM notes GROUP BY type ORDER BY 2 DESC
+        SELECT path, title FROM notes WHERE list_contains(tags, 'memory')
+        SELECT target, count(*) n FROM links GROUP BY target ORDER BY n DESC LIMIT 20
+        SELECT path, json_extract_string(frontmatter, '$.status') FROM notes WHERE type = 'projects'
+    """
+    return get_service().query(sql, limit=limit)
+
+
+@mcp.tool
+def recent(limit: int = 10, type: str | None = None) -> list[dict[str, Any]]:
+    """Most recently modified notes, optionally filtered by type."""
+    return get_service().recent(limit=limit, type=type)
+
+
+@mcp.tool
+def create_note(
+    title: str, content: str, tags: list[str] | None = None, source: str = ""
+) -> dict[str, str]:
+    """Create an atomic idea note in notes/ (one idea per note, template
+    frontmatter enforced). Use for durable ideas/insights worth keeping —
+    search first to avoid duplicating an existing note; link related notes
+    in the content with [[wiki-links]]. Fails if the note already exists."""
+    return get_service().create_note(title, content, tags=tags, source=source)
+
+
+@mcp.tool
+def add_inbox_item(text: str) -> dict[str, str]:
+    """Add an open action item to the vault inbox (the source of truth for
+    all open action items). Use for tasks/follow-ups, not ideas or status."""
+    return get_service().add_inbox_item(text)
+
+
+@mcp.tool
+def append_daily(text: str) -> dict[str, str]:
+    """Append a timestamped entry to today's journal Log — for decisions,
+    conclusions, work accomplished, and key insights as they happen."""
+    return get_service().append_daily(text)
+
+
+@mcp.tool
+def refresh_index() -> dict[str, int]:
+    """Force a rebuild of the metadata index from the files on disk.
+    Returns note and link counts."""
+    return get_service().refresh()
+
+
+def main() -> None:
+    mcp.run()
