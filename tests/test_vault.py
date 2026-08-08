@@ -194,6 +194,33 @@ def test_edit_note_rejects_missing_and_ambiguous(service: VaultService) -> None:
         service.edit_note("alpha", "", "x")
 
 
+def test_rename_note_rewrites_backlinks(service: VaultService, vault: Path) -> None:
+    (vault / "notes" / "delta.md").write_text(
+        "---\ndate: 2026-08-04\n---\n\n# Delta\n\n"
+        "See [[alpha|the alpha note]], [[alpha#Section]], and [[notes/alpha]]. "
+        "Not [[alphabet]].\n"
+    )
+    renamed = service.rename_note("alpha", "Alpha Prime")
+    assert renamed["old_path"] == "notes/alpha.md"
+    assert renamed["path"] == "notes/alpha-prime.md"
+    assert renamed["links_rewritten"] == 2  # beta.md and delta.md
+    assert not (vault / "notes" / "alpha.md").exists()
+    assert (vault / "notes" / "alpha-prime.md").read_text().splitlines()[6] == "# Alpha Prime"
+    delta = (vault / "notes" / "delta.md").read_text()
+    assert "[[alpha-prime|the alpha note]]" in delta
+    assert "[[alpha-prime#Section]]" in delta
+    assert "[[alpha-prime]]" in delta
+    assert "[[alphabet]]" in delta  # prefix must not match
+    assert "See [[alpha-prime]]." in (vault / "decisions" / "beta.md").read_text()
+    # graph stays intact: the rename is visible to resolve() after reindex
+    assert service.read("alpha-prime")["path"] == "notes/alpha-prime.md"
+
+
+def test_rename_note_refuses_overwrite(service: VaultService) -> None:
+    with pytest.raises(FileExistsError):
+        service.rename_note("alpha", "Gamma")
+
+
 def test_update_note_preserves_frontmatter(service: VaultService, vault: Path) -> None:
     updated = service.update_note("gamma", "# Gamma\n\nRewritten body.")
     assert updated["path"] == "notes/gamma.md"

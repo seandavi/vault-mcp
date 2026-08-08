@@ -332,6 +332,55 @@ class VaultService:
         return {"path": str(rel)}
 
     @locked
+    def rename_note(self, name_or_path: str, new_title: str) -> dict[str, Any]:
+        """Rename a note and rewrite [[wiki-links]] to it across the vault."""
+        old_path = self.resolve(name_or_path)
+        new_path = old_path.with_name(f"{slugify(new_title)}.md")
+        if new_path != old_path and new_path.exists():
+            raise FileExistsError(f"note already exists: {new_path.relative_to(self.root)}")
+        old_rel = old_path.relative_to(self.root)
+
+        # Links may be written as the bare stem or the vault-relative path,
+        # optionally carrying #heading or |alias suffixes; match the target
+        # part case-insensitively, the way Obsidian resolves them.
+        targets = {old_path.stem, str(old_rel), str(old_rel.with_suffix(""))}
+        link_re = re.compile(
+            r"\[\[(?:" + "|".join(re.escape(t) for t in sorted(targets)) + r")(?=[\]#|])",
+            re.IGNORECASE,
+        )
+        replacement = f"[[{new_path.stem}"
+        rewritten = 0
+        con = self.index.connection()
+        sources = con.execute(
+            "SELECT DISTINCT source FROM links WHERE lower(target) IN "
+            f"({', '.join('?' for _ in targets)})",
+            [t.lower() for t in targets],
+        ).fetchall()
+        for (source,) in sources:
+            source_path = self.root / source
+            text = source_path.read_text(encoding="utf-8")
+            new_text = link_re.sub(replacement, text)
+            if new_text != text:
+                source_path.write_text(new_text, encoding="utf-8")
+                rewritten += 1
+
+        # The vault template keeps the first H1 in sync with the title.
+        lines = old_path.read_text(encoding="utf-8").splitlines(keepends=True)
+        for i, line in enumerate(lines):
+            if line.startswith("# "):
+                lines[i] = f"# {new_title}\n"
+                break
+        old_path.write_text("".join(lines), encoding="utf-8")
+        if new_path != old_path:
+            old_path.rename(new_path)
+        self.index.invalidate()
+        return {
+            "old_path": str(old_rel),
+            "path": str(new_path.relative_to(self.root)),
+            "links_rewritten": rewritten,
+        }
+
+    @locked
     def update_note(self, name_or_path: str, content: str) -> dict[str, str]:
         """Replace a note's entire body, preserving its frontmatter block verbatim."""
         path = self.resolve(name_or_path)

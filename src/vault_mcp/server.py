@@ -30,6 +30,7 @@ Write verbs and their stores:
 - edit_note: surgical correction of an existing note — exact, unique
   string replacement.
 - update_note: wholesale rewrite of a note's body (frontmatter preserved).
+- rename_note: retitle a note; backlinks across the vault are rewritten.
 
 Read before you write: use search/related to check whether a memory already
 exists, and prefer linking to it over duplicating it. Before editing, always
@@ -140,6 +141,16 @@ def edit_note(name_or_path: str, old_text: str, new_text: str) -> dict[str, str]
     this over update_note for corrections: it cannot drop text you did not
     quote."""
     return get_service().edit_note(name_or_path, old_text, new_text)
+
+
+@mcp.tool
+def rename_note(name_or_path: str, new_title: str) -> dict[str, Any]:
+    """Rename a note to a new title. The file becomes slugify(new_title).md
+    in the same directory, the first H1 heading is set to the new title, and
+    [[wiki-links]] to the old name anywhere in the vault are rewritten to the
+    new one (|alias and #heading forms preserved). Fails if a note with the
+    target name already exists. Returns old_path, path, links_rewritten."""
+    return get_service().rename_note(name_or_path, new_title)
 
 
 @mcp.tool
