@@ -1,0 +1,25 @@
+# systemd user unit for the vault-mcp tailnet HTTP server (Linux).
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/vault-mcp.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now vault-mcp
+#   loginctl enable-linger $USER   # keep it running when logged out
+#
+# Adjust VAULT_MCP_REPO / VAULT_MCP_ROOT below if your paths differ.
+
+[Unit]
+Description=vault-mcp HTTP server on the tailnet
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Environment=VAULT_MCP_REPO=%h/Documents/git/vault-mcp
+Environment=VAULT_MCP_ROOT=%h/Documents/seandavis
+ExecStart=%h/Documents/git/vault-mcp/deploy/vault-mcp-tailnet.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
