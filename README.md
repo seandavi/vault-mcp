@@ -34,6 +34,8 @@ instructions so every connected agent receives it:
 | `query(sql, limit?)` | read | read-only SQL (DuckDB dialect, SELECT/WITH only) over `notes` and `links` tables |
 | `recent(limit?, type?)` | read | most recently modified notes |
 | `create_note(title, content, tags?, source?)` | write | atomic idea note in `notes/` with template frontmatter; refuses overwrite |
+| `edit_note(name_or_path, old_text, new_text)` | write | exact string replacement anywhere in a note (frontmatter included); `old_text` must occur exactly once, else the error says why |
+| `update_note(name_or_path, content)` | write | replace a note's entire body; the frontmatter block is preserved verbatim |
 | `add_inbox_item(text)` | write | open action item under `## Action needed` in `inbox.md` |
 | `append_daily(text)` | write | timestamped line in today's journal `## Log`, creating the file if needed |
 | `refresh_index()` | admin | force index rebuild; returns note/link counts |

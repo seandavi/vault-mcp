@@ -27,9 +27,14 @@ Write verbs and their stores:
 - add_inbox_item: prospective memory — an open action item.
 - create_note: promoted semantic memory — one atomic idea per note, linked
   generously with [[wiki-links]] to related notes.
+- edit_note: surgical correction of an existing note — exact, unique
+  string replacement.
+- update_note: wholesale rewrite of a note's body (frontmatter preserved).
 
 Read before you write: use search/related to check whether a memory already
-exists, and prefer linking to it over duplicating it.
+exists, and prefer linking to it over duplicating it. Before editing, always
+read_note first and quote the current text exactly; prefer edit_note over
+update_note so text you did not re-send cannot be lost.
 """
 
 mcp = FastMCP("vault-memory", instructions=INSTRUCTIONS)
@@ -123,6 +128,27 @@ def create_note(
     search first to avoid duplicating an existing note; link related notes
     in the content with [[wiki-links]]. Fails if the note already exists."""
     return get_service().create_note(title, content, tags=tags, source=source)
+
+
+@mcp.tool
+def edit_note(name_or_path: str, old_text: str, new_text: str) -> dict[str, str]:
+    """Surgically correct an existing note by exact string replacement.
+
+    old_text must occur exactly once in the note's current text — read_note
+    first and copy the passage verbatim, adding surrounding lines if it is
+    not unique. Works anywhere in the file, frontmatter included. Prefer
+    this over update_note for corrections: it cannot drop text you did not
+    quote."""
+    return get_service().edit_note(name_or_path, old_text, new_text)
+
+
+@mcp.tool
+def update_note(name_or_path: str, content: str) -> dict[str, str]:
+    """Rewrite a note's entire body. The frontmatter block is preserved
+    verbatim (use edit_note to change frontmatter). Everything below it is
+    replaced with content — read_note first and carry forward anything that
+    should survive. For targeted corrections use edit_note instead."""
+    return get_service().update_note(name_or_path, content)
 
 
 @mcp.tool
