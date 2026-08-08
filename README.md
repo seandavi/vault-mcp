@@ -36,6 +36,7 @@ instructions so every connected agent receives it:
 | `create_note(title, content, tags?, source?)` | write | atomic idea note in `notes/` with template frontmatter; refuses overwrite |
 | `edit_note(name_or_path, old_text, new_text)` | write | exact string replacement anywhere in a note (frontmatter included); `old_text` must occur exactly once, else the error says why |
 | `update_note(name_or_path, content)` | write | replace a note's entire body; the frontmatter block is preserved verbatim |
+| `rename_note(name_or_path, new_title)` | write | rename file + first H1 to the new title and rewrite `[[wiki-links]]` vault-wide (`\|alias`/`#heading` forms preserved); refuses overwrite |
 | `add_inbox_item(text)` | write | open action item under `## Action needed` in `inbox.md` |
 | `append_daily(text)` | write | timestamped line in today's journal `## Log`, creating the file if needed |
 | `refresh_index()` | admin | force index rebuild; returns note/link counts |
