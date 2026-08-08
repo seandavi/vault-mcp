@@ -123,7 +123,18 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.seandavis.vault-mcp.
 
 The agent runs `deploy/vault-mcp-tailnet.sh`, which waits for tailscaled,
 resolves the machine's Tailscale IP, and binds it directly on port 9321 —
-no `tailscale serve` layer needed. Verify and manage it with:
+no `tailscale serve` layer needed.
+
+> **macOS privacy (TCC):** launchd jobs have no access to `~/Documents`, so
+> if the repo or the vault lives there the agent dies with
+> `Operation not permitted` in the log. Grant Full Disk Access to the job's
+> interpreter — System Settings → Privacy & Security → Full Disk Access →
+> **+** → ⌘⇧G → `/bin/sh` — then restart it with
+> `launchctl kickstart -k gui/$(id -u)/com.seandavis.vault-mcp`.
+> (Terminal sessions don't hit this because the terminal app carries the
+> grant; launchd carries none.)
+
+Verify and manage it with:
 
 ```sh
 launchctl print gui/$(id -u)/com.seandavis.vault-mcp | head   # state
