@@ -310,6 +310,42 @@ class VaultService:
         return {"path": str(path.relative_to(self.root))}
 
     @locked
+    def edit_note(self, name_or_path: str, old_text: str, new_text: str) -> dict[str, str]:
+        """Replace exactly one occurrence of old_text anywhere in a note."""
+        if not old_text:
+            raise ValueError("old_text must be non-empty")
+        path = self.resolve(name_or_path)
+        rel = path.relative_to(self.root)
+        text = path.read_text(encoding="utf-8")
+        count = text.count(old_text)
+        if count == 0:
+            raise ValueError(
+                f"old_text not found in {rel} — read the note and copy the passage exactly"
+            )
+        if count > 1:
+            raise ValueError(
+                f"old_text occurs {count} times in {rel} — "
+                "include surrounding lines to make it unique"
+            )
+        path.write_text(text.replace(old_text, new_text, 1), encoding="utf-8")
+        self.index.invalidate()
+        return {"path": str(rel)}
+
+    @locked
+    def update_note(self, name_or_path: str, content: str) -> dict[str, str]:
+        """Replace a note's entire body, preserving its frontmatter block verbatim."""
+        path = self.resolve(name_or_path)
+        text = path.read_text(encoding="utf-8")
+        frontmatter = ""
+        if text.startswith("---\n"):
+            end = text.find("\n---\n", 4)
+            if end != -1:
+                frontmatter = text[: end + 5] + "\n"
+        path.write_text(f"{frontmatter}{content.strip()}\n", encoding="utf-8")
+        self.index.invalidate()
+        return {"path": str(path.relative_to(self.root))}
+
+    @locked
     def add_inbox_item(self, text: str) -> dict[str, str]:
         """Append an open action item under '## Action needed' in inbox.md."""
         inbox = self.root / "inbox.md"

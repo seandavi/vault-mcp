@@ -175,6 +175,40 @@ def test_create_note(service: VaultService, vault: Path) -> None:
     assert any(r["path"] == created["path"] for r in service.recent(limit=1))
 
 
+def test_edit_note(service: VaultService, vault: Path) -> None:
+    edited = service.edit_note("alpha", "[[missing-note]]", "[[gamma]]")
+    assert edited["path"] == "notes/alpha.md"
+    text = (vault / "notes" / "alpha.md").read_text()
+    assert "[[gamma]]" in text and "[[missing-note]]" not in text
+    # frontmatter is reachable too
+    service.edit_note("alpha", "source: test", "source: edited")
+    assert "source: edited" in (vault / "notes" / "alpha.md").read_text()
+
+
+def test_edit_note_rejects_missing_and_ambiguous(service: VaultService) -> None:
+    with pytest.raises(ValueError, match="not found"):
+        service.edit_note("alpha", "no such passage", "x")
+    with pytest.raises(ValueError, match="occurs 2 times"):
+        service.edit_note("alpha", "[[", "((")  # two wiki-links in alpha
+    with pytest.raises(ValueError, match="non-empty"):
+        service.edit_note("alpha", "", "x")
+
+
+def test_update_note_preserves_frontmatter(service: VaultService, vault: Path) -> None:
+    updated = service.update_note("gamma", "# Gamma\n\nRewritten body.")
+    assert updated["path"] == "notes/gamma.md"
+    text = (vault / "notes" / "gamma.md").read_text()
+    assert text.startswith("---\ndate: 2026-08-02\n")
+    assert "aliases: [standalone-note]" in text
+    assert text.endswith("---\n\n# Gamma\n\nRewritten body.\n")
+    assert "duckdb" not in text
+
+
+def test_update_note_without_frontmatter(service: VaultService, vault: Path) -> None:
+    service.update_note("inbox.md", "# Inbox\n\n## Action needed\n")
+    assert (vault / "inbox.md").read_text() == "# Inbox\n\n## Action needed\n"
+
+
 def test_add_inbox_item(service: VaultService, vault: Path) -> None:
     service.add_inbox_item("do the thing")
     lines = (vault / "inbox.md").read_text().splitlines()
