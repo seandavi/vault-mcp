@@ -106,22 +106,49 @@ memory substrate — one canonical index, one writer (which also keeps
 Obsidian-sync conflicts down, since remote machines write through the API
 instead of writing files and hoping sync merges them).
 
-On the machine that owns the vault:
+### macOS (launchd)
+
+On the (Mac) machine that owns the vault, run the server as a LaunchAgent so
+it starts at login and restarts if it dies:
 
 ```sh
-# 1. Run vault-mcp as a LaunchAgent (binds 127.0.0.1:8787)
+mkdir -p ~/.local/state   # log destination
 cp deploy/com.seandavis.vault-mcp.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.seandavis.vault-mcp.plist
-
-# 2. Front it with Tailscale Serve: real TLS certs, tailnet-only reachability
-tailscale serve --bg --https=443 127.0.0.1:8787
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.seandavis.vault-mcp.plist
 ```
 
-Clients on the tailnet then use `https://<machine>.<tailnet>.ts.net/mcp`.
+The agent runs `deploy/vault-mcp-tailnet.sh`, which waits for tailscaled,
+resolves the machine's Tailscale IP, and binds it directly on port 9321 —
+no `tailscale serve` layer needed. Verify and manage it with:
 
-Security model: on the tailnet the server runs with no auth; Tailscale is the
-auth layer. That holds only while it binds loopback (behind `tailscale serve`)
-or the machine's Tailscale IP — never bind `0.0.0.0`.
+```sh
+launchctl print gui/$(id -u)/com.seandavis.vault-mcp | head   # state
+tail -f ~/.local/state/vault-mcp-http.log                     # logs
+launchctl kickstart -k gui/$(id -u)/com.seandavis.vault-mcp   # restart (e.g. after git pull)
+launchctl bootout gui/$(id -u)/com.seandavis.vault-mcp        # stop + unload
+```
+
+Clients on the tailnet connect to `http://<tailscale-ip>:9321/mcp`, e.g.:
+
+```sh
+claude mcp add --transport http vault-memory http://100.72.62.9:9321/mcp
+```
+
+### Linux (systemd)
+
+The same wrapper script works as a systemd user service on a Linux tailnet
+member — `deploy/vault-mcp.service` carries the install steps in its header
+(copy to `~/.config/systemd/user/`, `systemctl --user enable --now vault-mcp`,
+and `loginctl enable-linger` so it survives logout).
+
+### Security model
+
+On the tailnet the server runs with no auth; Tailscale is the auth layer.
+That holds only while it binds the machine's Tailscale IP (what the wrapper
+does) or loopback behind `tailscale serve` — never bind `0.0.0.0`. If you
+want TLS and a stable DNS name instead of the raw IP, the loopback +
+`tailscale serve --bg --https=443 127.0.0.1:8787` arrangement still works;
+the direct bind is just fewer moving parts.
 
 ## OAuth (optional)
 
