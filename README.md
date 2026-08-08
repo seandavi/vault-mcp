@@ -155,6 +155,34 @@ uv run vault-mcp                 # run the server on stdio
 uv run python -m vault_mcp.eval  # retrieval eval (query set: <vault>/.vault-mcp/eval.yaml)
 ```
 
+## Retrieval benchmark
+
+`vault_mcp.eval` runs a fixed query set against each search engine and reports
+rank-of-first-expected-hit, hit rate, MRR, and latency per engine
+(`uv run python -m vault_mcp.eval`). Query sets reference real note paths, so
+they live inside the vault (`<vault>/.vault-mcp/eval.yaml`), never in this repo.
+
+Representative results on a ~2,200-note vault, 11 queries spanning topical
+paraphrases, substring/exact-phrase/regex lookups, and digit-bearing
+identifiers:
+
+| engine | hit@5 | hit@10 | mean latency |
+| --- | --- | --- | --- |
+| `ranked` (BM25) | 70% | 90% | ~100 ms |
+| `exact` (ripgrep) | 40% | 40% | ~75 ms |
+
+The engines are complementary, not redundant: substring, exact-phrase, and
+regex queries all miss in ranked mode and hit in exact mode (BM25 tokenizes
+and has no phrase syntax), while topical paraphrases do the reverse (literal
+matching can't cross word gaps). The first ranked query after a rebuild pays
+the lazy BM25 index build (~200 ms at this size); a warm full index rebuild is
+~630 ms.
+
+Known failure mode: natural-language questions against long notes — the FTS
+extension normalizes even title-restricted matches by whole-document length,
+so short notes outrank long ones with exact title matches. A title-term bonus
+is the planned fix (tracked on the wayfinder map).
+
 ## Roadmap
 
 - **v0.2 — consolidation agent.** Nightly promotion pass modeled on memory
