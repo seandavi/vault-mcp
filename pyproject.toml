@@ -3,6 +3,8 @@ name = "vault-mcp"
 version = "0.1.0"
 description = "MCP server exposing a markdown vault as an agent memory substrate"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "Sean Davis", email = "seandavi@gmail.com" }
 ]

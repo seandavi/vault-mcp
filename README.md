@@ -1,5 +1,8 @@
 # vault-mcp
 
+[![ci](https://github.com/seandavi/vault-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/seandavi/vault-mcp/actions/workflows/ci.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 An MCP server that exposes a markdown vault (Obsidian-style: YAML frontmatter +
 `[[wiki-links]]`) as a **shared memory substrate** for coding/research agents —
 Claude Code, Gemini CLI, Codex, or anything else that speaks MCP.
