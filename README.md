@@ -132,7 +132,11 @@ no `tailscale serve` layer needed.
 > **+** → ⌘⇧G → `/bin/sh` — then restart it with
 > `launchctl kickstart -k gui/$(id -u)/com.seandavis.vault-mcp`.
 > (Terminal sessions don't hit this because the terminal app carries the
-> grant; launchd carries none.)
+> grant; launchd carries none.) The wrapper execs the venv's `vault-mcp`, so
+> the venv's Python (`readlink -f .venv/bin/python`) needs the grant too;
+> it does not go through `uv run`, because each Homebrew uv upgrade moves
+> uv's path and drops its grant, leaving the server serving an empty vault.
+> After `git pull`, run `uv sync` before restarting.
 
 Verify and manage it with:
 
