@@ -29,4 +29,8 @@ if [ -z "$HOST" ]; then
     exit 1
 fi
 
-exec uv run --directory "$REPO" vault-mcp --http --host "$HOST" --port "$PORT"
+# Exec the venv entry point, not `uv run`: under launchd, macOS privacy (TCC)
+# checks the exec'd binary, and a Homebrew uv upgrade changes uv's path and
+# silently drops its Full Disk Access (the server then sees an empty vault).
+# The venv's Python is stable across uv upgrades. Run `uv sync` after pulling.
+exec "$REPO/.venv/bin/vault-mcp" --http --host "$HOST" --port "$PORT"
